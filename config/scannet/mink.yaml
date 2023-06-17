@@ -7,7 +7,7 @@ DATA:
   use_shm: False
 
 TRAIN:
-  arch_3d: MinkUNet18A
+  arch_3d: MinkUNet14B
   ignore_label: 255
   train_gpu: [0]
   workers: 8  # data loader workers

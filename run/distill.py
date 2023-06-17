@@ -188,6 +188,8 @@ def main_worker(gpu, ngpus_per_node, argss):
                                             sampler=train_sampler,
                                             drop_last=True, collate_fn=collation_fn,
                                             worker_init_fn=worker_init_fn)
+
+    print(train_data.data_paths)
     if args.evaluate:
         val_data = Point3DLoader(datapath_prefix=args.data_root,
                                  voxel_size=args.voxel_size,
