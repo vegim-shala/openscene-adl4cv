@@ -1,10 +1,14 @@
 import os
+import pickle
 import time
 import random
+from typing import Optional
+
+import numpy
 import numpy as np
 import logging
 import argparse
-
+import json
 import torch
 import torch.backends.cudnn as cudnn
 import torch.nn as nn
@@ -15,13 +19,15 @@ import torch.multiprocessing as mp
 import torch.distributed as dist
 from tensorboardX import SummaryWriter
 
-from MinkowskiEngine import SparseTensor
+from MinkowskiEngine.MinkowskiSparseTensor import SparseTensor
+from torchmetrics import MetricCollection, Accuracy, Precision, Recall, F1Score, MeanSquaredError, MeanAbsoluteError
+
 from util import config
 from util.util import AverageMeter, intersectionAndUnionGPU, \
     poly_learning_rate, save_checkpoint, \
     export_pointcloud, get_palette, convert_labels_with_palette, extract_clip_feature
 from dataset.label_constants import *
-from dataset.feature_loader import FusedFeatureLoader, collation_fn
+from dataset.feature_loader import FusedFeatureLoader, collation_fn,collation_fn_eval_alll
 from dataset.point_loader import Point3DLoader, collation_fn_eval_all
 from models.disnet import DisNet as Model
 from tqdm import tqdm
@@ -40,11 +46,11 @@ def get_parser():
 
     parser = argparse.ArgumentParser(description='OpenScene 3D distillation.')
     parser.add_argument('--config', type=str,
-                        default='config/scannet/distill_openseg.yaml',
+                        default='config/scannet/openvoc.yaml',
                         help='config file')
     parser.add_argument('opts',
                         default=None,
-                        help='see config/scannet/distill_openseg.yaml for all options',
+                        help='see config/scannet/openvoc.yaml for all options',
                         nargs=argparse.REMAINDER)
     args_in = parser.parse_args()
     assert args_in.config is not None
@@ -87,16 +93,16 @@ def main():
     os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(
         str(x) for x in args.train_gpu)
     cudnn.benchmark = True
-    if args.manual_seed is not None:
-        random.seed(args.manual_seed)
-        np.random.seed(args.manual_seed)
-        torch.manual_seed(args.manual_seed)
-        torch.cuda.manual_seed(args.manual_seed)
-        torch.cuda.manual_seed_all(args.manual_seed)
-    
+    # if args.manual_seed is not None:
+    #     random.seed(args.manual_seed)
+    #     np.random.seed(args.manual_seed)
+    #     torch.manual_seed(args.manual_seed)
+    #     torch.cuda.manual_seed(args.manual_seed)
+    #     torch.cuda.manual_seed_all(args.manual_seed)
+
     # By default we use shared memory for training
-    if not hasattr(args, 'use_shm'):
-        args.use_shm = True
+    # if not hasattr(args, 'use_shm'):
+    #     args.use_shm = True
 
     print(
         'torch.__version__:%s\ntorch.version.cuda:%s\ntorch.backends.cudnn.version:%s\ntorch.backends.cudnn.enabled:%s' % (
@@ -126,7 +132,7 @@ def main_worker(gpu, ngpus_per_node, argss):
     if args.distributed:
         if args.multiprocessing_distributed:
             args.rank = args.rank * ngpus_per_node + gpu
-        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, 
+        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
                                 world_size=args.world_size, rank=args.rank)
 
     model = get_model(args)
@@ -138,6 +144,7 @@ def main_worker(gpu, ngpus_per_node, argss):
         logger.info("=> creating model ...")
 
     # ####################### Optimizer ####################### #
+    # optimizer = torch.optim.SGD(model.parameters(), lr=args.base_lr)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.base_lr)
     args.index_split = 0
 
@@ -177,16 +184,19 @@ def main_worker(gpu, ngpus_per_node, argss):
                                     datapath_prefix_feat=args.data_root_2d_fused_feature,
                                     voxel_size=args.voxel_size,
                                     split='train', aug=args.aug,
+                                    eval_all=True,
                                     memcache_init=args.use_shm, loop=args.loop,
                                     input_color=args.input_color
                                     )
+
     train_sampler = torch.utils.data.distributed.DistributedSampler(
         train_data) if args.distributed else None
+
     train_loader = torch.utils.data.DataLoader(train_data, batch_size=args.batch_size,
                                             shuffle=(train_sampler is None),
                                             num_workers=args.workers, pin_memory=True,
                                             sampler=train_sampler,
-                                            drop_last=True, collate_fn=collation_fn,
+                                            drop_last=True, collate_fn=collation_fn_eval_alll,
                                             worker_init_fn=worker_init_fn)
 
     print(train_data.data_paths)
@@ -207,6 +217,9 @@ def main_worker(gpu, ngpus_per_node, argss):
 
         criterion = nn.CrossEntropyLoss(ignore_index=args.ignore_label).cuda(gpu) # for evaluation
 
+    # obtain the CLIP feature
+    text_features, _ = obtain_text_features_and_palette()
+
     # ####################### Distill ####################### #
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
@@ -221,17 +234,17 @@ def main_worker(gpu, ngpus_per_node, argss):
         is_best = False
         if args.evaluate and (epoch_log % args.eval_freq == 0):
             loss_val, mIoU_val, mAcc_val, allAcc_val = validate(
-                val_loader, model, criterion)
-            # raise NotImplementedError
-
-            if main_process():
-                writer.add_scalar('loss_val', loss_val, epoch_log)
-                writer.add_scalar('mIoU_val', mIoU_val, epoch_log)
-                writer.add_scalar('mAcc_val', mAcc_val, epoch_log)
-                writer.add_scalar('allAcc_val', allAcc_val, epoch_log)
-                # remember best iou and save checkpoint
-                is_best = mIoU_val > best_iou
-                best_iou = max(best_iou, mIoU_val)
+                val_loader, model, criterion, text_features)
+        #
+        #     if main_process():
+        #         writer.add_scalar('loss_val', loss_val, epoch_log)
+        #         writer.add_scalar('mIoU_val', mIoU_val, epoch_log)
+        #         writer.add_scalar('mAcc_val', mAcc_val, epoch_log)
+        #         writer.add_scalar('allAcc_val', allAcc_val, epoch_log)
+        #         # remember best iou and save checkpoint
+        #         is_best = mIoU_val > best_iou
+        #         best_iou = max(best_iou, mIoU_val)
+        #
 
         if (epoch_log % args.save_freq == 0) and main_process():
             save_checkpoint(
@@ -242,9 +255,54 @@ def main_worker(gpu, ngpus_per_node, argss):
                     'best_iou': best_iou
                 }, is_best, os.path.join(args.save_path, 'model')
             )
+
+    torch.save(model.state_dict(), 'test_overfit.pth')
+
+    find_segment(val_loader, model)
+
     if main_process():
         writer.close()
         logger.info('==>Training done!\nBest Iou: %.3f' % (best_iou))
+
+
+def find_segment(val_loader, model):
+    text_features, palette = obtain_text_features_and_palette()
+    text_feature = text_features[3]
+    with torch.no_grad():
+        for batch_data in tqdm(val_loader):
+            (coords, feat, label, inds_reverse, maskDict) = batch_data
+            sinput = SparseTensor(
+                feat.cuda(non_blocking=True), coords.cuda(non_blocking=True))
+            output = model(sinput)
+
+            max_similarity = 0
+            current_key = -1
+            current_dict = {}
+            for key in sorted(maskDict[0].keys(), key=lambda a: int(a)):
+                if int(key) not in label[0].keys():
+                    continue
+                seg_3d_features = output[inds_reverse[maskDict[0][key]]]
+                mean_feature = torch.mean(seg_3d_features, 0)
+
+                # similarity = torch.nn.CosineSimilarity()(mean_feature.unsqueeze(0), text_feature.unsqueeze(0))
+
+                current_dict[key] = torch.nn.CosineSimilarity()(mean_feature.unsqueeze(0), text_feature.unsqueeze(0))
+
+            keylist = []
+            for lab in sorted(current_dict.keys(), key=lambda a: current_dict[a]):
+                keylist.append(lab)
+
+            # for item in sorted(current_dict.values(), key=lambda a: int(a)):
+            #     print()
+
+            print(keylist)
+
+
+            return current_key
+
+
+
+
 
 
 def get_model(cfg):
@@ -256,27 +314,15 @@ def get_model(cfg):
 def obtain_text_features_and_palette():
     '''obtain the CLIP text feature and palette.'''
 
-    if 'scannet' in args.data_root:
-        labelset = list(SCANNET_LABELS_20)
-        labelset[-1] = 'other'
-        palette = get_palette()
-        dataset_name = 'scannet'
-    elif 'matterport' in args.data_root:
-        labelset = list(MATTERPORT_LABELS_21)
-        palette = get_palette(colormap='matterport')
-        dataset_name = 'matterport'
-    elif 'nuscenes' in args.data_root:
-        labelset = list(NUSCENES_LABELS_16)
-        palette = get_palette(colormap='nuscenes16')
-        dataset_name = 'nuscenes'
+    labelset = list(SCANNET_LABELS_20)
+    labelset[-1] = 'other'
+    palette = get_palette()
+    dataset_name = 'scannet'
 
     if not os.path.exists('saved_text_embeddings'):
         os.makedirs('saved_text_embeddings')
 
-    if 'openseg' in args.feature_2d_extractor:
-        model_name="ViT-L/14@336px"
-        postfix = '_768' # the dimension of CLIP features is 768
-    elif 'lseg' in args.feature_2d_extractor:
+    if 'segment_anything_clip' in args.feature_2d_extractor:
         model_name="ViT-B/32"
         postfix = '_512' # the dimension of CLIP features is 512
     else:
@@ -303,39 +349,67 @@ def distill(train_loader, model, optimizer, epoch):
 
     loss_meter = AverageMeter()
 
+
+
     model.train()
     end = time.time()
     max_iter = args.epochs * len(train_loader)
 
-    text_features, palette = obtain_text_features_and_palette()
+    # TODO: Replace ADAM with SGD, + more epochs, turn off augmentations
+    # Log also: cosine similarity, top2 top3 accuracy, load torch metrics
+    # Start visualizing: training data that we are supervising.
+    #
+
 
     # start the distillation process
     for i, batch_data in enumerate(train_loader):
         data_time.update(time.time() - end)
+        # print(i)
+        # print(label_3d)
 
-        (coords, feat, label_3d, feat_3d, mask) = batch_data
-        coords[:, 1:4] += (torch.rand(3) * 100).type_as(coords)
-        sinput = SparseTensor(
-            feat.cuda(non_blocking=True), coords.cuda(non_blocking=True))
-        feat_3d, mask = feat_3d.cuda(
-            non_blocking=True), mask.cuda(non_blocking=True)
+        (coords, feat, label_3d, fused_feature_dict_list, inds_reverse, maskDict) = batch_data
 
+        # coords[:, 1:4] += (torch.rand(3) * 100).type_as(coords)
+        feat, coords = feat.cuda(non_blocking=True), coords.cuda(non_blocking=True)
+        sinput = SparseTensor(feat, coords)
         output_3d = model(sinput)
-        output_3d = output_3d[mask]
 
-        if hasattr(args, 'loss_type') and args.loss_type == 'cosine':
-            loss = (1 - torch.nn.CosineSimilarity()
-                    (output_3d, feat_3d)).mean()
-        elif hasattr(args, 'loss_type') and args.loss_type == 'l1':
-            loss = torch.nn.L1Loss()(output_3d, feat_3d)
-        else:
-            raise NotImplementedError
+        n_seg = 0
+        mean_features_list = []
+        fused_features_list = []
+        output_recons = output_3d[inds_reverse]
+        print(output_recons.shape)
+        for key in maskDict[0]:
+            if str(key) in fused_feature_dict_list[0]:
+                n_seg+=1
+                seg_fused_feature = fused_feature_dict_list[0][str(key)]
+                seg_fused_feature=seg_fused_feature.to(device ="cuda")
+
+                seg_3d_features = output_recons[maskDict[0][key]]
+
+                mean_feature = torch.mean(seg_3d_features,0)
+
+                mean_features_list.append(mean_feature)
+                fused_features_list.append(seg_fused_feature)
+
+        mean_features_stacked = torch.stack(mean_features_list)
+        fused_features_stacked = torch.stack(fused_features_list)
+
+        loss = (1 - torch.nn.CosineSimilarity()(mean_features_stacked, fused_features_stacked)).mean()
+
+
+        # if main_process():
+            # logger.info(f'Cosine Similarity Loss: {loss}')
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
+        # if main_process():
+        #     logger.info(f'Cosine Similarity Loss after backward: {loss}')
+
         loss_meter.update(loss.item(), args.batch_size)
+
         batch_time.update(time.time() - end)
 
         # adjust learning rate
@@ -365,44 +439,45 @@ def distill(train_loader, model, optimizer, epoch):
                                                             batch_time=batch_time, data_time=data_time,
                                                             remain_time=remain_time,
                                                             loss_meter=loss_meter))
+
         if main_process():
             writer.add_scalar('loss_train_batch', loss_meter.val, current_iter)
             writer.add_scalar('learning_rate', current_lr, current_iter)
 
         end = time.time()
 
-    mask_first = (coords[mask][:, 0] == 0)
-    output_3d = output_3d[mask_first]
-    feat_3d = feat_3d[mask_first]
-    logits_pred = output_3d.half() @ text_features.t()
-    logits_img = feat_3d.half() @ text_features.t()
-    logits_pred = torch.max(logits_pred, 1)[1].cpu().numpy()
-    logits_img = torch.max(logits_img, 1)[1].cpu().numpy()
-    mask = mask.cpu().numpy()
-    logits_gt = label_3d.numpy()[mask][mask_first.cpu().numpy()]
-    logits_gt[logits_gt == 255] = args.classes
-
-    pcl = coords[:, 1:].cpu().numpy()
-
-    seg_label_color = convert_labels_with_palette(
-        logits_img, palette)
-    pred_label_color = convert_labels_with_palette(
-        logits_pred, palette)
-    gt_label_color = convert_labels_with_palette(
-        logits_gt, palette)
-    pcl_part = pcl[mask][mask_first.cpu().numpy()]
-
-    export_pointcloud(os.path.join(args.save_path, 'result', 'last', '{}_{}.ply'.format(
-        args.feature_2d_extractor, epoch)), pcl_part, colors=seg_label_color)
-    export_pointcloud(os.path.join(args.save_path, 'result', 'last',
-                        'pred_{}.ply'.format(epoch)), pcl_part, colors=pred_label_color)
-    export_pointcloud(os.path.join(args.save_path, 'result', 'last',
-                        'gt_{}.ply'.format(epoch)), pcl_part, colors=gt_label_color)
+    # mask_first = (coords[mask][:, 0] == 0)
+    # output_3d = output_3d[mask_first]
+    # feat_3d = feat_3d[mask_first]
+    # logits_pred = output_3d.half() @ text_features.t()
+    # logits_img = feat_3d.half() @ text_features.t()
+    # logits_pred = torch.max(logits_pred, 1)[1].cpu().numpy()
+    # logits_img = torch.max(logits_img, 1)[1].cpu().numpy()
+    # mask = mask.cpu().numpy()
+    # logits_gt = label_3d.numpy()[mask][mask_first.cpu().numpy()]
+    # logits_gt[logits_gt == 255] = args.classes
+    #
+    # pcl = coords[:, 1:].cpu().numpy()
+    #
+    # seg_label_color = convert_labels_with_palette(
+    #     logits_img, palette)
+    # pred_label_color = convert_labels_with_palette(
+    #     logits_pred, palette)
+    # gt_label_color = convert_labels_with_palette(
+    #     logits_gt, palette)
+    # pcl_part = pcl[mask][mask_first.cpu().numpy()]
+    #
+    # export_pointcloud(os.path.join(args.save_path, 'result', 'last', '{}_{}.ply'.format(
+    #     args.feature_2d_extractor, epoch)), pcl_part, colors=seg_label_color)
+    # export_pointcloud(os.path.join(args.save_path, 'result', 'last',
+    #                     'pred_{}.ply'.format(epoch)), pcl_part, colors=pred_label_color)
+    # export_pointcloud(os.path.join(args.save_path, 'result', 'last',
+    #                     'gt_{}.ply'.format(epoch)), pcl_part, colors=gt_label_color)
 
     return loss_meter.avg
 
 
-def validate(val_loader, model, criterion):
+def validate(val_loader, model, criterion, text_features):
     '''Validation.'''
 
     torch.backends.cudnn.enabled = False
@@ -411,26 +486,82 @@ def validate(val_loader, model, criterion):
     union_meter = AverageMeter()
     target_meter = AverageMeter()
 
-    # obtain the CLIP feature
-    text_features, _ = obtain_text_features_and_palette()
+    fused_feature_path = "data/overfit/scene0000_00.pt"
+    fused_feature_dict = torch.load(fused_feature_path, map_location="cpu")
+    metric_collection = MetricCollection({
+        'acc': Accuracy(task='multiclass',  num_classes=609, average='macro').to(device='cuda'),
+        'prec': Precision(task='multiclass', num_classes=609, average='macro').to(device='cuda'),
+        'rec': Recall(task='multiclass', num_classes=609, average='macro').to(device='cuda'),
+        'f1': F1Score(task='multiclass', num_classes=609, average='macro').to(device='cuda'),
+        'mse': MeanSquaredError(num_classes=609, average='macro').to(device='cuda'),
+        'mae': MeanAbsoluteError(num_classes=609, average='macro').to(device='cuda'),
+        # 'top2': TopKAccuracy(),
+        # 'iou': IoU(num_classes=10, average='macro'),
+    })
+
 
     with torch.no_grad():
         for batch_data in tqdm(val_loader):
-            (coords, feat, label, inds_reverse) = batch_data
+            (coords, feat, label, inds_reverse, maskDict) = batch_data
             sinput = SparseTensor(
                 feat.cuda(non_blocking=True), coords.cuda(non_blocking=True))
-            label = label.cuda(non_blocking=True)
             output = model(sinput)
-            output = output[inds_reverse, :]
-            output = output.half() @ text_features.t()
-            loss = criterion(output, label)
-            output = torch.max(output, 1)[1]
 
-            intersection, union, target = intersectionAndUnionGPU(output, label.detach(),
+            tensorlist = []
+            tensorlist2 = []
+            for key in sorted(maskDict[0].keys(), key=lambda a: int(a)):
+                if int(key) not in label[0].keys():
+                    continue
+                seg_fused_feature = fused_feature_dict[str(key)]
+                seg_fused_feature = seg_fused_feature.to(device="cuda")
+                seg_3d_features = output[inds_reverse][maskDict[0][key]]
+                mean_feature = torch.mean(seg_3d_features, 0)
+                tensorlist.append(mean_feature)
+                tensorlist2.append(seg_fused_feature)
+
+            stacked_output = torch.stack(tensorlist2)
+
+            stacked_output = stacked_output/stacked_output.norm(dim=-1, keepdim=True)
+
+            print("text_features_shape")
+            print(text_features.shape)
+            stacked_output = stacked_output.half() @ text_features.t()
+
+
+            sorted_labels = list()
+            for lab in sorted(label[0].keys(), key=lambda a: int(a)):
+                sorted_labels.append(label[0][lab])
+
+            sorted_labels = numpy.asarray(sorted_labels).astype(np.uint8)
+            sorted_labels = torch.from_numpy(sorted_labels).long()
+
+            # sorted_labels = torch.as_tensor(sorted_labels, dtype=torch.int)
+            sorted_labels = sorted_labels.cuda(non_blocking=True)
+
+            loss = criterion(stacked_output, sorted_labels)
+
+            top2_acc = top_k_accuracy(stacked_output, sorted_labels, k=2)
+            top3_acc = top_k_accuracy(stacked_output, sorted_labels, k=3)
+
+            if main_process():
+                logger.info(f'Top2 Accuracy: {top2_acc} and Top3 Accuracy: {top3_acc}')
+
+            stacked_output = torch.max(stacked_output, 1)[1]
+
+            print(stacked_output.shape)
+            print(sorted_labels.shape)
+
+            batch_metrics = metric_collection.forward(stacked_output, sorted_labels)
+            print(f"Metrics on batch: {batch_metrics}")
+
+
+
+            intersection, union, target = intersectionAndUnionGPU(stacked_output, sorted_labels.detach(),
                                                                   args.classes, args.ignore_label)
             if args.multiprocessing_distributed:
                 dist.all_reduce(intersection), dist.all_reduce(
                     union), dist.all_reduce(target)
+
             intersection, union, target = intersection.cpu(
             ).numpy(), union.cpu().numpy(), target.cpu().numpy()
             intersection_meter.update(intersection), union_meter.update(
@@ -444,9 +575,18 @@ def validate(val_loader, model, criterion):
     mAcc = np.mean(accuracy_class)
     allAcc = sum(intersection_meter.sum) / (sum(target_meter.sum) + 1e-10)
     if main_process():
+        val_metrics = metric_collection.compute()
+        print(f"Metrics on all data: {val_metrics}")
         logger.info(
-            'Val result: mIoU/mAcc/allAcc {:.4f}/{:.4f}/{:.4f}.'.format(mIoU, mAcc, allAcc))
+            'Val result: mIoU/mAcc/allAcc {:.4f}/{:.4f}/{:.4f}. loss: {:.4f}'.format(mIoU, mAcc, allAcc, loss_meter.avg))
     return loss_meter.avg, mIoU, mAcc, allAcc
+
+def top_k_accuracy(predictions, labels, k):
+    _, top_predictions = torch.topk(predictions, k, dim=1)
+    correct = top_predictions.eq(labels.view(-1, 1).expand_as(top_predictions))
+    correct_k = correct.sum().item()
+    accuracy = correct_k / labels.size(0)
+    return accuracy
 
 
 if __name__ == '__main__':

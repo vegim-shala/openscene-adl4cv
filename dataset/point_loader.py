@@ -1,5 +1,6 @@
 '''Dataloader for 3D points.'''
-
+import json
+import os
 from glob import glob
 import multiprocessing as mp
 from os.path import join, exists
@@ -8,6 +9,8 @@ import torch
 import SharedArray as SA
 import dataset.augmentation as t
 from dataset.voxelizer import Voxelizer
+
+from dataset.label_constants import *
 
 
 def sa_create(name, var):
@@ -39,7 +42,7 @@ def collation_fn_eval_all(batch):
     :return:   coords_batch: N x 4 (x,y,z,batch)
 
     '''
-    coords, feats, labels, inds_recons = list(zip(*batch))
+    coords, feats, labels, inds_recons, maskDict = list(zip(*batch))
     inds_recons = list(inds_recons)
 
     accmulate_points_num = 0
@@ -48,7 +51,7 @@ def collation_fn_eval_all(batch):
         inds_recons[i] = accmulate_points_num + inds_recons[i]
         accmulate_points_num += coords[i].shape[0]
 
-    return torch.cat(coords), torch.cat(feats), torch.cat(labels), torch.cat(inds_recons)
+    return torch.cat(coords), torch.cat(feats), list(labels), torch.cat(inds_recons), list(maskDict)
 
 
 class Point3DLoader(torch.utils.data.Dataset):
@@ -169,9 +172,41 @@ class Point3DLoader(torch.utils.data.Dataset):
             feats = torch.ones(coords.shape[0], 3)
         labels = torch.from_numpy(labels).long()
 
+        scene_name = self.data_paths[index][:-15].split('/')[-1]
+        # Get mask dictionary
+        mask_dicts_root = '/mnt/hdd/mask_dicts'
+
+        f = open(os.path.join(mask_dicts_root, scene_name + ".json"))
+        maskDict = json.load(f)
+        f.close()
+
+        aggregation_root = '/mnt/hdd/scans'
+        f = open(os.path.join(aggregation_root, scene_name, scene_name + "_vh_clean.aggregation.json"))
+        segments = json.load(f)
+        f.close()
+
+        labels = {}
+        # unique_labels = []
+
+        for object in segments['segGroups']:
+            # unique_labels.append(object['label'])
+            for segment in object['segments']:
+                labels[segment] = self.mapToConstant(object['label'])
+
+        # unique_labels = list(set(unique_labels))
+        # print(unique_labels)
+
         if self.eval_all:
-            return coords, feats, labels, torch.from_numpy(inds_reconstruct).long()
-        return coords, feats, labels
+            return coords, feats, labels, torch.from_numpy(inds_reconstruct).long(), maskDict
+        return coords, feats, labels, maskDict
 
     def __len__(self):
         return len(self.data_paths) * self.loop
+
+    def mapToConstant(self, label):
+        labels_list = list(SCANNET_LABELS_20)
+        try:
+            index = labels_list.index(label)
+        except:
+            index = 255
+        return index

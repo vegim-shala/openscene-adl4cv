@@ -133,3 +133,5 @@ dmypy.json
 out
 3rdParty
 initmodel
+
+**/test1212/**

@@ -23,13 +23,8 @@ class DisNet(nn.Module):
     def __init__(self, cfg=None):
         super(DisNet, self).__init__()
         if not hasattr(cfg, 'feature_2d_extractor'):
-            cfg.feature_2d_extractor = 'openseg'
-        if 'lseg' in cfg.feature_2d_extractor:
-            last_dim = 512
-        elif 'openseg' in cfg.feature_2d_extractor:
-            last_dim = 768
-        else:
-            raise NotImplementedError
+            cfg.feature_2d_extractor = 'segment_anything_clip'
+        last_dim = 512
 
         # MinkowskiNet for 3D point clouds
         net3d = constructor3d(in_channels=3, out_channels=last_dim, D=3, arch=cfg.arch_3d)

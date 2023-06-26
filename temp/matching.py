@@ -7,7 +7,9 @@ import json
 import os
 import numpy as np
 
+import cv2
 import imageio
+import torch
 
 import fusion_util
 import importlib
@@ -48,7 +50,7 @@ point2img_mapper = fusion_util.PointCloudToImageMapper(
 
 from glob import glob
 
-sample_2d = os.path.join(scannet_root_path,"sample_2d")
+scannet_2d = os.path.join("/mnt/hdd/scannet_2d","scene0000_00")
 mask_info_path = os.path.join(scannet_root_path,"masks_info")
 matching_path = os.path.join(scannet_root_path, "matching.json")
 
@@ -58,24 +60,29 @@ if os.path.exists(matching_path):
     f.close()
 else:
     matching = {}
-for img in sorted(glob(os.path.join(sample_2d, "color", "*.jpg")), key=lambda x: int(os.path.basename(x)[:-4])):
+for img in sorted(glob(os.path.join(scannet_2d, "color", "*.jpg")), key=lambda x: int(os.path.basename(x)[:-4])):
     image_id = os.path.basename(img)[:-4]
     # if int(image_id) > 120:
     #     continue
     print("processing image ", os.path.basename(img))
 
-    color_image_path = os.path.join(sample_2d, "color", os.path.basename(img))
+    color_image_path = os.path.join(scannet_2d, "color", os.path.basename(img))
     pose_path = color_image_path.replace('color', 'pose').replace('.jpg', '.txt')
     pose = np.loadtxt(pose_path)
 
     depth_scale = 1000.0
     depth = imageio.v2.imread(color_image_path.replace('color', 'depth').replace('jpg', 'png')) / depth_scale
+    depth = cv2.resize(depth,img_dim)
+    # depth.resize((480,640))
+
+    print(depth.shape)
 
     sam_dict = {}
     mapping = point2img_mapper.compute_mapping(pose, point_cloud_in_numpy, depth)
-    # print(mapping)
+    # print(len(mapping))
     pixelToPoint = {}
     inside_list = np.where(mapping[:,2]!=0)[0].tolist()
+    print(len(inside_list))
     for i in inside_list:
         x = mapping[i][1]
         y = mapping[i][0]
@@ -87,7 +94,13 @@ for img in sorted(glob(os.path.join(sample_2d, "color", "*.jpg")), key=lambda x:
     path = os.path.join(mask_info_path, image_id + ".json")
     if os.path.exists(path):
         f = open(os.path.join(mask_info_path, image_id + ".json"))
-        mask_info = json.load(f)
+        try:
+            mask_info = json.load(f)
+        except:
+            print("invalid json")
+
+            continue
+
         masks_bbox = mask_info['mask_bbox']
         f.close()
     else:
@@ -125,7 +138,7 @@ for img in sorted(glob(os.path.join(sample_2d, "color", "*.jpg")), key=lambda x:
                     matching[key].append((image_id, max_index))
 
 matching_path = os.path.join('/mnt/hdd/scans/scene0000_00', "matching.json")
-print(matching)
+# print(matching)
 with open(matching_path, 'w') as fp:
   json.dump(matching, fp)
 

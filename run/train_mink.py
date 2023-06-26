@@ -109,10 +109,10 @@ def main():
         args.multiprocessing_distributed = False
         args.use_apex = False
 
-    print("CURRENT DATA ROOT: ", args.data_root)
-    print("CURRENT voxel_size: ", args.voxel_size)
-    print("CURRENT AUG: ", args.aug)
-    print("CURRENT use_shm: ", args.use_shm)
+        print("CURRENT DATA ROOT: ", args.data_root)
+        print("CURRENT voxel_size: ", args.voxel_size)
+        print("CURRENT AUG: ", args.aug)
+        print("CURRENT use_shm: ", args.use_shm)
 
     _ = Point3DLoader(datapath_prefix=args.data_root,
                       voxel_size=args.voxel_size,
@@ -300,6 +300,10 @@ def train(train_loader, model, criterion, optimizer, epoch):
     intersection_meter = AverageMeter()
     union_meter = AverageMeter()
     target_meter = AverageMeter()
+    #
+    # model.cuda()
+    # criterion.cuda()
+    # # optimizer.cuda()
 
     print("TRAIN 2")
 
@@ -312,7 +316,7 @@ def train(train_loader, model, criterion, optimizer, epoch):
         print("TRAIN 3_1")
         data_time.update(time.time() - end)
         (coords, feat, label) = batch_data
-        coords[:, :3] += (torch.rand(3) * 100).type_as(coords)
+        coords[:, -3:] += (torch.rand(3) * 100).type_as(coords)
 
         print("TRAIN 3_2")
 
@@ -328,12 +332,19 @@ def train(train_loader, model, criterion, optimizer, epoch):
 
         print(SparseTensor.__module__)
 
+
+
         print("TRAIN 3_2_1")
         print("TRAIN 3_2_2")
         print("input in train_mink = ", sinput)
         print(type(sinput))
         output = model(sinput)
         print("TRAIN 3_2_3")
+
+        label = label.to(output.device)
+
+
+
         loss = criterion(output, label)
 
         print("TRAIN 3_3")

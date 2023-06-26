@@ -1,9 +1,14 @@
 
+import os
+import torch
+
+
 import numpy as np
 
-from os.path import join
+from os.path import join, exists
 
 import cv2
+import gc
 from segment_anything import sam_model_registry , SamAutomaticMaskGenerator
 
 scene_name = "scene0000_00_2d"

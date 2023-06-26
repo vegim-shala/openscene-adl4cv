@@ -59,6 +59,7 @@ def load_cfg_from_cfg_file(file):
     '''Load from config files.'''
 
     cfg = {}
+    print(file)
     assert os.path.isfile(file) and file.endswith('.yaml'), \
         '{} is not a yaml file'.format(file)
 

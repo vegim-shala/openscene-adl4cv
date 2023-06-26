@@ -46,7 +46,7 @@ matches = matching["56914"]
 
 for i in range(len(matches)):
     img_id, mask = matches[i]
-    mask_path = os.path.join(scannet_root_path,"crops", img_id, "mask_" + str(mask) + ".jpg")
+    mask_path = os.path.join(scannet_root_path,"blacked_out_crops", img_id, "mask_" + str(mask) + ".jpg")
     shutil.copy(mask_path, save_path)
 new_pcd = o3d.geometry.PointCloud()
 new_pcd.points = pcd.points
