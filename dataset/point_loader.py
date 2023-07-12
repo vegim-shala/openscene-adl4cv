@@ -42,7 +42,7 @@ def collation_fn_eval_all(batch):
     :return:   coords_batch: N x 4 (x,y,z,batch)
 
     '''
-    coords, feats, labels, inds_recons, maskDict = list(zip(*batch))
+    coords, feats, labels,point_labels, inds_recons, maskDict = list(zip(*batch))
     inds_recons = list(inds_recons)
 
     accmulate_points_num = 0
@@ -51,7 +51,7 @@ def collation_fn_eval_all(batch):
         inds_recons[i] = accmulate_points_num + inds_recons[i]
         accmulate_points_num += coords[i].shape[0]
 
-    return torch.cat(coords), torch.cat(feats), list(labels), torch.cat(inds_recons), list(maskDict)
+    return torch.cat(coords), torch.cat(feats), list(labels),torch.cat(point_labels) ,torch.cat(inds_recons), list(maskDict)
 
 
 class Point3DLoader(torch.utils.data.Dataset):
@@ -185,19 +185,14 @@ class Point3DLoader(torch.utils.data.Dataset):
         segments = json.load(f)
         f.close()
 
-        labels = {}
-        # unique_labels = []
+        seg_labels = {}
 
         for object in segments['segGroups']:
-            # unique_labels.append(object['label'])
             for segment in object['segments']:
-                labels[segment] = self.mapToConstant(object['label'])
-
-        # unique_labels = list(set(unique_labels))
-        # print(unique_labels)
+                seg_labels[segment] = self.mapToConstant(object['label'])
 
         if self.eval_all:
-            return coords, feats, labels, torch.from_numpy(inds_reconstruct).long(), maskDict
+            return coords, feats, seg_labels,labels, torch.from_numpy(inds_reconstruct).long(), maskDict
         return coords, feats, labels, maskDict
 
     def __len__(self):

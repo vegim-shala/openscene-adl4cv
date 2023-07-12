@@ -1,6 +1,6 @@
 DATA:
-  data_root: data/overfit
-  data_root_2d_fused_feature: data/overfit
+  data_root: data/overfit0
+  data_root_2d_fused_feature: data/overfit0
   feature_2d_extractor: segment_anything_clip
   classes: 20
   aug: False

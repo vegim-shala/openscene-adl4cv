@@ -1,14 +1,13 @@
 import os
-import pickle
+from sklearn.decomposition import PCA
+
 import time
 import random
-from typing import Optional
 
 import numpy
 import numpy as np
 import logging
 import argparse
-import json
 import torch
 import torch.backends.cudnn as cudnn
 import torch.nn as nn
@@ -17,10 +16,12 @@ import torch.optim
 import torch.utils.data
 import torch.multiprocessing as mp
 import torch.distributed as dist
+from matplotlib import pyplot as plt
 from tensorboardX import SummaryWriter
 
 from MinkowskiEngine.MinkowskiSparseTensor import SparseTensor
-from torchmetrics import MetricCollection, Accuracy, Precision, Recall, F1Score, MeanSquaredError, MeanAbsoluteError
+from torchmetrics import MetricCollection, Accuracy, Precision, Recall, F1Score, MeanSquaredError, MeanAbsoluteError, \
+    ConfusionMatrix
 
 from util import config
 from util.util import AverageMeter, intersectionAndUnionGPU, \
@@ -34,6 +35,14 @@ from tqdm import tqdm
 
 
 best_iou = 0.0
+
+train_loss_values = []
+validation_loss_values = []
+top2_accuracy_values = []
+top3_accuracy_values = []
+mIoU_values = []
+mAcc_values = []
+allAcc_values = []
 
 
 def worker_init_fn(worker_id):
@@ -93,16 +102,6 @@ def main():
     os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(
         str(x) for x in args.train_gpu)
     cudnn.benchmark = True
-    # if args.manual_seed is not None:
-    #     random.seed(args.manual_seed)
-    #     np.random.seed(args.manual_seed)
-    #     torch.manual_seed(args.manual_seed)
-    #     torch.cuda.manual_seed(args.manual_seed)
-    #     torch.cuda.manual_seed_all(args.manual_seed)
-
-    # By default we use shared memory for training
-    # if not hasattr(args, 'use_shm'):
-    #     args.use_shm = True
 
     print(
         'torch.__version__:%s\ntorch.version.cuda:%s\ntorch.backends.cudnn.version:%s\ntorch.backends.cudnn.enabled:%s' % (
@@ -199,7 +198,6 @@ def main_worker(gpu, ngpus_per_node, argss):
                                             drop_last=True, collate_fn=collation_fn_eval_alll,
                                             worker_init_fn=worker_init_fn)
 
-    print(train_data.data_paths)
     if args.evaluate:
         val_data = Point3DLoader(datapath_prefix=args.data_root,
                                  voxel_size=args.voxel_size,
@@ -227,6 +225,7 @@ def main_worker(gpu, ngpus_per_node, argss):
             if args.evaluate:
                 val_sampler.set_epoch(epoch)
         loss_train = distill(train_loader, model, optimizer, epoch)
+        train_loss_values.append(loss_train)
         epoch_log = epoch + 1
         if main_process():
             writer.add_scalar('loss_train', loss_train, epoch_log)
@@ -235,16 +234,21 @@ def main_worker(gpu, ngpus_per_node, argss):
         if args.evaluate and (epoch_log % args.eval_freq == 0):
             loss_val, mIoU_val, mAcc_val, allAcc_val = validate(
                 val_loader, model, criterion, text_features)
-        #
-        #     if main_process():
-        #         writer.add_scalar('loss_val', loss_val, epoch_log)
-        #         writer.add_scalar('mIoU_val', mIoU_val, epoch_log)
-        #         writer.add_scalar('mAcc_val', mAcc_val, epoch_log)
-        #         writer.add_scalar('allAcc_val', allAcc_val, epoch_log)
-        #         # remember best iou and save checkpoint
-        #         is_best = mIoU_val > best_iou
-        #         best_iou = max(best_iou, mIoU_val)
-        #
+
+            validation_loss_values.append(loss_val)
+            mIoU_values.append(mIoU_val)
+            mAcc_values.append(mAcc_val)
+            allAcc_values.append(allAcc_val)
+
+            if main_process():
+                writer.add_scalar('loss_val', loss_val, epoch_log)
+                writer.add_scalar('mIoU_val', mIoU_val, epoch_log)
+                writer.add_scalar('mAcc_val', mAcc_val, epoch_log)
+                writer.add_scalar('allAcc_val', allAcc_val, epoch_log)
+                # remember best iou and save checkpoint
+                is_best = mIoU_val > best_iou
+                best_iou = max(best_iou, mIoU_val)
+
 
         if (epoch_log % args.save_freq == 0) and main_process():
             save_checkpoint(
@@ -256,53 +260,26 @@ def main_worker(gpu, ngpus_per_node, argss):
                 }, is_best, os.path.join(args.save_path, 'model')
             )
 
-    torch.save(model.state_dict(), 'test_overfit.pth')
+    # print('train_loss_values')
+    # print(train_loss_values)
+    # print('validation_loss_values')
+    # print(validation_loss_values)
+    # print('top2_accuracy_values')
+    # print(top2_accuracy_values)
+    # print('top3_accuracy_values')
+    # print(top3_accuracy_values)
+    # print('mIoU_values')
+    # print(mIoU_values)
+    # print('mAcc_values')
+    # print(mAcc_values)
+    # print('allAcc_values')
+    # print(allAcc_values)
 
-    find_segment(val_loader, model)
+    torch.save(model.state_dict(), 'test_overfit.pth')
 
     if main_process():
         writer.close()
         logger.info('==>Training done!\nBest Iou: %.3f' % (best_iou))
-
-
-def find_segment(val_loader, model):
-    text_features, palette = obtain_text_features_and_palette()
-    text_feature = text_features[3]
-    with torch.no_grad():
-        for batch_data in tqdm(val_loader):
-            (coords, feat, label, inds_reverse, maskDict) = batch_data
-            sinput = SparseTensor(
-                feat.cuda(non_blocking=True), coords.cuda(non_blocking=True))
-            output = model(sinput)
-
-            max_similarity = 0
-            current_key = -1
-            current_dict = {}
-            for key in sorted(maskDict[0].keys(), key=lambda a: int(a)):
-                if int(key) not in label[0].keys():
-                    continue
-                seg_3d_features = output[inds_reverse[maskDict[0][key]]]
-                mean_feature = torch.mean(seg_3d_features, 0)
-
-                # similarity = torch.nn.CosineSimilarity()(mean_feature.unsqueeze(0), text_feature.unsqueeze(0))
-
-                current_dict[key] = torch.nn.CosineSimilarity()(mean_feature.unsqueeze(0), text_feature.unsqueeze(0))
-
-            keylist = []
-            for lab in sorted(current_dict.keys(), key=lambda a: current_dict[a]):
-                keylist.append(lab)
-
-            # for item in sorted(current_dict.values(), key=lambda a: int(a)):
-            #     print()
-
-            print(keylist)
-
-
-            return current_key
-
-
-
-
 
 
 def get_model(cfg):
@@ -349,27 +326,16 @@ def distill(train_loader, model, optimizer, epoch):
 
     loss_meter = AverageMeter()
 
-
-
     model.train()
     end = time.time()
     max_iter = args.epochs * len(train_loader)
 
-    # TODO: Replace ADAM with SGD, + more epochs, turn off augmentations
-    # Log also: cosine similarity, top2 top3 accuracy, load torch metrics
-    # Start visualizing: training data that we are supervising.
-    #
-
-
     # start the distillation process
     for i, batch_data in enumerate(train_loader):
         data_time.update(time.time() - end)
-        # print(i)
-        # print(label_3d)
 
         (coords, feat, label_3d, fused_feature_dict_list, inds_reverse, maskDict) = batch_data
 
-        # coords[:, 1:4] += (torch.rand(3) * 100).type_as(coords)
         feat, coords = feat.cuda(non_blocking=True), coords.cuda(non_blocking=True)
         sinput = SparseTensor(feat, coords)
         output_3d = model(sinput)
@@ -377,36 +343,37 @@ def distill(train_loader, model, optimizer, epoch):
         n_seg = 0
         mean_features_list = []
         fused_features_list = []
+        loss_3d_keys = []
         output_recons = output_3d[inds_reverse]
-        print(output_recons.shape)
         for key in maskDict[0]:
-            if str(key) in fused_feature_dict_list[0]:
+            if int(key) in fused_feature_dict_list[0]:
+
                 n_seg+=1
-                seg_fused_feature = fused_feature_dict_list[0][str(key)]
+                seg_fused_feature = fused_feature_dict_list[0][int(key)]
                 seg_fused_feature=seg_fused_feature.to(device ="cuda")
 
                 seg_3d_features = output_recons[maskDict[0][key]]
 
                 mean_feature = torch.mean(seg_3d_features,0)
-
-                mean_features_list.append(mean_feature)
-                fused_features_list.append(seg_fused_feature)
+                for point in range(0, len(maskDict[0][key])):
+                    loss_3d_keys.append(int(key))
+                    mean_features_list.append(mean_feature)
+                    fused_features_list.append(seg_fused_feature)
 
         mean_features_stacked = torch.stack(mean_features_list)
         fused_features_stacked = torch.stack(fused_features_list)
 
-        loss = (1 - torch.nn.CosineSimilarity()(mean_features_stacked, fused_features_stacked)).mean()
+        loss = (1 - torch.nn.CosineSimilarity()(mean_features_stacked, fused_features_stacked))
 
+        loss_3d = {}
+        for i in range(0, len(loss_3d_keys)):
+            loss_3d[loss_3d_keys[i]] = loss[i].item()
 
-        # if main_process():
-            # logger.info(f'Cosine Similarity Loss: {loss}')
+        loss = loss.mean()
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-
-        # if main_process():
-        #     logger.info(f'Cosine Similarity Loss after backward: {loss}')
 
         loss_meter.update(loss.item(), args.batch_size)
 
@@ -442,37 +409,9 @@ def distill(train_loader, model, optimizer, epoch):
 
         if main_process():
             writer.add_scalar('loss_train_batch', loss_meter.val, current_iter)
-            writer.add_scalar('learning_rate', current_lr, current_iter)
+            # writer.add_scalar('learning_rate', current_lr, current_iter)
 
         end = time.time()
-
-    # mask_first = (coords[mask][:, 0] == 0)
-    # output_3d = output_3d[mask_first]
-    # feat_3d = feat_3d[mask_first]
-    # logits_pred = output_3d.half() @ text_features.t()
-    # logits_img = feat_3d.half() @ text_features.t()
-    # logits_pred = torch.max(logits_pred, 1)[1].cpu().numpy()
-    # logits_img = torch.max(logits_img, 1)[1].cpu().numpy()
-    # mask = mask.cpu().numpy()
-    # logits_gt = label_3d.numpy()[mask][mask_first.cpu().numpy()]
-    # logits_gt[logits_gt == 255] = args.classes
-    #
-    # pcl = coords[:, 1:].cpu().numpy()
-    #
-    # seg_label_color = convert_labels_with_palette(
-    #     logits_img, palette)
-    # pred_label_color = convert_labels_with_palette(
-    #     logits_pred, palette)
-    # gt_label_color = convert_labels_with_palette(
-    #     logits_gt, palette)
-    # pcl_part = pcl[mask][mask_first.cpu().numpy()]
-    #
-    # export_pointcloud(os.path.join(args.save_path, 'result', 'last', '{}_{}.ply'.format(
-    #     args.feature_2d_extractor, epoch)), pcl_part, colors=seg_label_color)
-    # export_pointcloud(os.path.join(args.save_path, 'result', 'last',
-    #                     'pred_{}.ply'.format(epoch)), pcl_part, colors=pred_label_color)
-    # export_pointcloud(os.path.join(args.save_path, 'result', 'last',
-    #                     'gt_{}.ply'.format(epoch)), pcl_part, colors=gt_label_color)
 
     return loss_meter.avg
 
@@ -486,78 +425,82 @@ def validate(val_loader, model, criterion, text_features):
     union_meter = AverageMeter()
     target_meter = AverageMeter()
 
-    fused_feature_path = "data/overfit/scene0000_00.pt"
+    fused_feature_path = "data/overfit1/scene0006_00.pt"
     fused_feature_dict = torch.load(fused_feature_path, map_location="cpu")
     metric_collection = MetricCollection({
-        'acc': Accuracy(task='multiclass',  num_classes=609, average='macro').to(device='cuda'),
-        'prec': Precision(task='multiclass', num_classes=609, average='macro').to(device='cuda'),
-        'rec': Recall(task='multiclass', num_classes=609, average='macro').to(device='cuda'),
-        'f1': F1Score(task='multiclass', num_classes=609, average='macro').to(device='cuda'),
-        'mse': MeanSquaredError(num_classes=609, average='macro').to(device='cuda'),
-        'mae': MeanAbsoluteError(num_classes=609, average='macro').to(device='cuda'),
-        # 'top2': TopKAccuracy(),
-        # 'iou': IoU(num_classes=10, average='macro'),
+        'acc': Accuracy(task='multiclass',  num_classes=20, average='macro').to(device='cuda'),
+        'prec': Precision(task='multiclass', num_classes=20, average='macro').to(device='cuda'),
+        'rec': Recall(task='multiclass', num_classes=20, average='macro').to(device='cuda'),
+        'f1': F1Score(task='multiclass', num_classes=20, average='macro').to(device='cuda'),
+        'mse': MeanSquaredError(num_classes=20, average='macro').to(device='cuda'),
+        'mae': MeanAbsoluteError(num_classes=20, average='macro').to(device='cuda'),
+        'confMatrix': ConfusionMatrix(task='multiclass', num_classes=20, average='macro').to(device='cuda')
     })
-
 
     with torch.no_grad():
         for batch_data in tqdm(val_loader):
-            (coords, feat, label, inds_reverse, maskDict) = batch_data
+            (coords, feat, label,point_labels, inds_reverse, maskDict) = batch_data
             sinput = SparseTensor(
                 feat.cuda(non_blocking=True), coords.cuda(non_blocking=True))
             output = model(sinput)
 
             tensorlist = []
             tensorlist2 = []
-            for key in sorted(maskDict[0].keys(), key=lambda a: int(a)):
-                if int(key) not in label[0].keys():
-                    continue
-                seg_fused_feature = fused_feature_dict[str(key)]
+            keys = {}
+            maskDict2 = {}
+
+            for seg in maskDict[0].keys():
+                maskDict2[int(seg)] = maskDict[0][str(seg)]
+
+            common_segments = list(
+                set(maskDict2.keys()).intersection(set(label[0].keys())
+                                                   .intersection(set(fused_feature_dict.keys())
+                                                                 ))
+            )
+
+            sorted_labels = list()
+            key_list = list()
+            for key in sorted(common_segments):
+                key_list.append(key)
+                keys[key] = len(maskDict2[key])
+                seg_fused_feature = fused_feature_dict[key]
                 seg_fused_feature = seg_fused_feature.to(device="cuda")
-                seg_3d_features = output[inds_reverse][maskDict[0][key]]
+                seg_3d_features = output[inds_reverse][maskDict2[key]]
                 mean_feature = torch.mean(seg_3d_features, 0)
                 tensorlist.append(mean_feature)
                 tensorlist2.append(seg_fused_feature)
+                sorted_labels.append(label[0][key])
 
             stacked_output = torch.stack(tensorlist2)
 
+
+
+            # Assign colors to each data point based on labels
             stacked_output = stacked_output/stacked_output.norm(dim=-1, keepdim=True)
 
-            print("text_features_shape")
-            print(text_features.shape)
             stacked_output = stacked_output.half() @ text_features.t()
 
-
-            sorted_labels = list()
-            for lab in sorted(label[0].keys(), key=lambda a: int(a)):
-                sorted_labels.append(label[0][lab])
-
             sorted_labels = numpy.asarray(sorted_labels).astype(np.uint8)
+
             sorted_labels = torch.from_numpy(sorted_labels).long()
 
-            # sorted_labels = torch.as_tensor(sorted_labels, dtype=torch.int)
             sorted_labels = sorted_labels.cuda(non_blocking=True)
 
             loss = criterion(stacked_output, sorted_labels)
 
             top2_acc = top_k_accuracy(stacked_output, sorted_labels, k=2)
             top3_acc = top_k_accuracy(stacked_output, sorted_labels, k=3)
+            top2_accuracy_values.append(top2_acc)
+            top3_accuracy_values.append(top3_acc)
 
             if main_process():
                 logger.info(f'Top2 Accuracy: {top2_acc} and Top3 Accuracy: {top3_acc}')
 
             stacked_output = torch.max(stacked_output, 1)[1]
 
-            print(stacked_output.shape)
-            print(sorted_labels.shape)
-
-            batch_metrics = metric_collection.forward(stacked_output, sorted_labels)
-            print(f"Metrics on batch: {batch_metrics}")
-
-
-
             intersection, union, target = intersectionAndUnionGPU(stacked_output, sorted_labels.detach(),
-                                                                  args.classes, args.ignore_label)
+                                                                                args.classes, args.ignore_label, keys)
+
             if args.multiprocessing_distributed:
                 dist.all_reduce(intersection), dist.all_reduce(
                     union), dist.all_reduce(target)
@@ -575,8 +518,6 @@ def validate(val_loader, model, criterion, text_features):
     mAcc = np.mean(accuracy_class)
     allAcc = sum(intersection_meter.sum) / (sum(target_meter.sum) + 1e-10)
     if main_process():
-        val_metrics = metric_collection.compute()
-        print(f"Metrics on all data: {val_metrics}")
         logger.info(
             'Val result: mIoU/mAcc/allAcc {:.4f}/{:.4f}/{:.4f}. loss: {:.4f}'.format(mIoU, mAcc, allAcc, loss_meter.avg))
     return loss_meter.avg, mIoU, mAcc, allAcc

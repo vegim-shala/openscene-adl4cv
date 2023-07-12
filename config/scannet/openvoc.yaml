@@ -28,7 +28,7 @@ DISTILL:
   save_path:
   resume:
   evaluate: True  # evaluate on validation set, extra gpu memory needed and small batch_size_val is recommend
-  eval_freq: 10
+  eval_freq: 1
 
 TEST:
   split: val  # split in [train, val]

@@ -33,10 +33,8 @@ class FusedFeatureLoader(Point3DLoader):
         self.datapath_feat = datapath_prefix_feat
 
         self.list_occur = []
-        print(len(self.data_paths))
         for data_path in self.data_paths:
             scene_name = data_path[:-15].split('/')[-1]
-            print("scene name:" ,scene_name)
             file_dirs = glob(join(self.datapath_feat, scene_name + '_*.pt'))
             self.list_occur.append(len(file_dirs))
 
@@ -60,8 +58,8 @@ class FusedFeatureLoader(Point3DLoader):
 
         scene_name = self.data_paths[index][:-15].split('/')[-1]
         fused_feature_path = join(self.datapath_feat,scene_name+'.pt')
-        print("FUSED FEATURE PATH")
-        print(fused_feature_path)
+        # print("FUSED FEATURE PATH")
+        # print(fused_feature_path)
         processed_data = torch.load(join(self.datapath_feat,scene_name+'.pt'), map_location="cpu")
 
         # locs = self.prevoxel_transforms(locs_in) if self.aug else locs_in
@@ -86,8 +84,6 @@ class FusedFeatureLoader(Point3DLoader):
         f = open(os.path.join(mask_dicts_root, scene_name + ".json"))
         maskDict = json.load(f)
         f.close()
-
-
 
         if self.eval_all:
             return coords, feats, labels, processed_data, torch.from_numpy(inds_reconstruct).long(), maskDict
