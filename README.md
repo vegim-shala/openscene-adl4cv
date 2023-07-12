@@ -4,17 +4,8 @@
 
   <h1 align="center"><img src="https://pengsongyou.github.io/media/openscene/logo.png" width="40">OpenScene: 3D Scene Understanding with Open Vocabularies</h1>
   <p align="center">
-    <a href="https://pengsongyou.github.io"><strong>Songyou Peng</strong></a>
-    ·
-    <a href="https://www.kylegenova.com/"><strong>Kyle Genova</strong></a>
-    ·
-    <a href="https://www.maxjiang.ml/"><strong>Chiyu "Max" Jiang</strong></a>
-    ·
-    <a href="https://taiya.github.io/"><strong>Andrea Tagliasacchi</strong></a>
-    <br>
-    <a href="https://people.inf.ethz.ch/pomarc/"><strong>Marc Pollefeys</strong></a>
-    ·
-    <a href="https://www.cs.princeton.edu/~funk/"><strong>Thomas Funkhouser</strong></a>
+        <p align="center">Ajinkya Mohgaonkar</p>
+        <p align="center">Vegim Shala</p>
   </p>
   <h2 align="center">CVPR 2023</h2>
   <h3 align="center"><a href="https://arxiv.org/abs/2211.15654">Paper</a> | <a href="https://youtu.be/jZxCLHyDJf8">Video</a> | <a href="https://pengsongyou.github.io/openscene">Project Page</a></h3>
@@ -27,7 +18,9 @@
 </p>
 <p align="center">
 <strong>OpenScene</strong> is a zero-shot approach to perform a series of novel 3D scene understanding tasks using open-vocabulary queries.
-</p>
+
+We forked the code repository of OpenScene and we made our changes in the implementation. 
+For setup and installation please follow the guide below, which is provided by OpenScene</p>
 <br>
 
 <!-- TABLE OF CONTENTS -->
