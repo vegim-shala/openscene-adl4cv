@@ -15,11 +15,8 @@ from clip import clip
 from tensorboardX import SummaryWriter
 from MinkowskiEngine.MinkowskiSparseTensor import SparseTensor
 from util import config
-from util.util import AverageMeter, intersectionAndUnionGPU, \
-    poly_learning_rate, save_checkpoint, \
-    export_pointcloud, get_palette, convert_labels_with_palette, extract_clip_feature
+from util.util import get_palette, extract_clip_feature
 from dataset.label_constants import *
-from dataset.feature_loader import FusedFeatureLoader, collation_fn
 from dataset.point_loader import Point3DLoader, collation_fn_eval_all
 from models.disnet import DisNet as Model
 from tqdm import tqdm
@@ -144,8 +141,6 @@ def main_worker(gpu, ngpus_per_node, argss):
                      'curtain', 'coffee table', 'couch', 'dish rack', 'doorframe', 'guitar case', 'desk', 'sink',
                      'kitchen cabinets', 'kitchen counter', 'window', 'shelf', 'trash can', 'cabinet', 'table',
                      'wall', 'ceiling', 'shower', 'nightstand', 'shoes', 'scale', 'backpack', 'pillow']
-    # queries = ['dish rack']
-    # queries = ['bed']
     fused_features_path = "data/overfit/scene0000_00.pt"
     fused_features = torch.load(fused_features_path, map_location='cpu')
     for query in queries:
@@ -309,14 +304,6 @@ def validate2(fused_features, text_feature, text_query):
     print(avg_prec)
 
     mAP.append(avg_prec)
-
-
-
-
-
-    # print(precisions)
-    # print(recalls)
-    print(f1_scores)
 
     max_f1_index = np.asarray(f1_scores).argmax()+1
     # max_f1 = max(f1_scores)
